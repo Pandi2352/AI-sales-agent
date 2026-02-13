@@ -1,0 +1,2 @@
+from .battle_card_html import generate_battle_card_html
+from .comparison_chart import generate_comparison_chart

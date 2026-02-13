@@ -1,0 +1,1 @@
+export { BattleCardPage } from './BattleCardPage';
