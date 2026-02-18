@@ -12,12 +12,20 @@ class StageNameEnum(str, Enum):
     COMPARISON_CHART = "comparison_chart"
 
 
+class TemplateEnum(str, Enum):
+    SALES_REP = "sales_rep"
+    EXECUTIVE = "executive"
+    DETAILED = "detailed"
+    SLIDE_DECK = "slide_deck"
+
+
 class BattleCardRequest(BaseModel):
     competitor: str
     your_product: str
     target_audience: str | None = None
     project_name: str | None = None
     about_project: str | None = None
+    template: TemplateEnum = TemplateEnum.DETAILED
 
 
 class StageStatus(BaseModel):

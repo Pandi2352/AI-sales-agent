@@ -37,12 +37,15 @@ export type StageName =
   | 'battle_card'
   | 'comparison_chart';
 
+export type TemplateName = 'sales_rep' | 'executive' | 'detailed' | 'slide_deck';
+
 export interface BattleCardRequest {
   competitor: string;
   your_product: string;
   target_audience?: string;
   project_name?: string;
   about_project?: string;
+  template?: TemplateName;
 }
 
 export interface BattleCardGenerateResponse {
@@ -56,6 +59,15 @@ export interface PipelineStatusResponse {
   progress: number;
   current_stage: StageName | null;
   error: string | null;
+  completed_stages: StageName[];
+  project_name?: string;
+  competitor?: string;
+  created_at?: string;
+}
+
+export interface StageResultResponse {
+  stage_name: StageName;
+  content: string;
 }
 
 export interface BattleCardResult {
@@ -70,6 +82,9 @@ export interface JobListItem {
   job_id: string;
   status: string;
   progress: number;
+  project_name?: string;
+  competitor?: string;
+  created_at?: string;
 }
 
 export interface JobListResponse {
@@ -95,3 +110,7 @@ export interface DiscoveredCompetitor {
 export interface DiscoverResponse {
   competitors: DiscoveredCompetitor[];
 }
+
+// ── Compare Types ─────────────────────────────────────────────────
+export type { CompareTab, CompareJobData } from './compare';
+export { COMPARE_STAGES, COMPARE_TABS } from './compare';

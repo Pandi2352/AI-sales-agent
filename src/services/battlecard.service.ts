@@ -7,6 +7,7 @@ import type {
   JobListResponse,
   DiscoverRequest,
   DiscoverResponse,
+  StageResultResponse,
 } from '@/types';
 
 export const battlecardService = {
@@ -34,6 +35,13 @@ export const battlecardService = {
 
   async listJobs() {
     const res = await apiClient.get<JobListResponse>(ENDPOINTS.BATTLECARD.LIST);
+    return res.data;
+  },
+
+  async getStageResult(jobId: string, stageName: string) {
+    const res = await apiClient.get<StageResultResponse>(
+      ENDPOINTS.BATTLECARD.STAGE_RESULT(jobId, stageName),
+    );
     return res.data;
   },
 

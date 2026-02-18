@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -6,16 +6,64 @@ import {
   Share2,
   Image,
   FileText,
-  Loader2,
   AlertCircle,
   FileCode,
   FileImage,
-  Printer,
   FileDown,
+  MoreVertical,
+  List,
+  Loader2,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { battlecardService } from '@/services';
 import type { BattleCardResult } from '@/types';
 import { cn } from '@/utils';
+import { Skeleton } from '@/components/common';
+import { usePageTitle } from '@/hooks';
+
+// ── HTML Parsing Helpers ─────────────────────────────────────────────
+
+interface TocSection {
+  id: string;
+  label: string;
+}
+
+/** Extract <style> tags and <body> content from a full HTML document. */
+function parseHtmlDocument(html: string): {
+  linkTags: string;
+  styles: string;
+  body: string;
+} {
+  // Extract <style> tag contents
+  const styleTags = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
+  let styles = styleTags.join('\n');
+
+  // Convert @import url(...) to <link> tags for Shadow DOM compatibility
+  const links: string[] = [];
+  styles = styles.replace(
+    /@import\s+url\(['"]?([^'")\s]+)['"]?\)\s*;?/g,
+    (_, url: string) => {
+      links.push(`<link rel="stylesheet" href="${url}">`);
+      return '';
+    },
+  );
+
+  // Extract body content
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+  const body = bodyMatch ? bodyMatch[1] : html;
+
+  return { linkTags: links.join('\n'), styles, body };
+}
+
+/** Clean a heading's textContent into a short TOC label. */
+function cleanTocLabel(raw: string): string {
+  return raw
+    .replace(/^(CAUTION|ADVANTAGE|COMPETITIVE)\s*/i, '')
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, '') // strip emoji
+    .trim();
+}
+
+// ── Fallback HTML Builder ────────────────────────────────────────────
 
 /** Detect special battle card section types */
 function getSectionType(text: string): string {
@@ -33,15 +81,10 @@ function getSectionType(text: string): string {
 
 /** Inline markdown formatting */
 function fmt(text: string): string {
-  // Bold+italic
   text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<b class="bi">$1</b>');
-  // Bold with colon → colored label badge
   text = text.replace(/\*\*(.+?:)\*\*/g, '<span class="lbl">$1</span>');
-  // Bold → strong tag
   text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  // Italic (single *)
   text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<i>$1</i>');
-  // Inline code
   text = text.replace(/`(.+?)`/g, '<code>$1</code>');
   return text;
 }
@@ -57,20 +100,40 @@ function buildFallbackHtml(rawText: string): string {
   let inList: 'ul' | 'ol' | '' = '';
   let cardOpen = false;
 
-  const closeList = () => { if (inList) { o.push(`</${inList}>`); inList = ''; } };
-  const closeCard = () => { if (cardOpen) { o.push('</section>'); cardOpen = false; } };
+  const closeList = () => {
+    if (inList) {
+      o.push(`</${inList}>`);
+      inList = '';
+    }
+  };
+  const closeCard = () => {
+    if (cardOpen) {
+      o.push('</section>');
+      cardOpen = false;
+    }
+  };
   const openSection = (tag: string, content: string, stype: string) => {
-    closeList(); closeCard();
-    const icon = { danger: '&#9888;', success: '&#10003;', objection: '&#128172;', warning: '&#10071;', info: '&#9432;', purple: '&#127919;', stats: '&#128202;' }[stype] || '';
-    o.push(`<${tag} class="sec sec-${stype || 'default'}">${icon ? `<span class="sec-icon">${icon}</span>` : ''}${fmt(content)}</${tag}>`);
+    closeList();
+    closeCard();
+    const icon =
+      {
+        danger: '&#9888;',
+        success: '&#10003;',
+        objection: '&#128172;',
+        warning: '&#10071;',
+        info: '&#9432;',
+        purple: '&#127919;',
+        stats: '&#128202;',
+      }[stype] || '';
+    o.push(
+      `<${tag} class="sec sec-${stype || 'default'}">${icon ? `<span class="sec-icon">${icon}</span>` : ''}${fmt(content)}</${tag}>`,
+    );
     o.push(`<section class="card card-${stype || 'default'}">`);
     cardOpen = true;
   };
 
   for (const line of lines) {
     const t = line.trim();
-
-    // ── Markdown headers ──
     const h3 = t.match(/^###\s+(.+)$/);
     const h2 = !h3 && t.match(/^##\s+(.+)$/);
     const h1 = !h3 && !h2 && t.match(/^#\s+(.+)$/);
@@ -79,60 +142,69 @@ function buildFallbackHtml(rawText: string): string {
       const tag = h1 ? 'h2' : h2 ? 'h2' : 'h3';
       const stype = getSectionType(m[1]);
       if (tag === 'h3') {
-        // h3 = subsection header within a card
         closeList();
-        o.push(`<h3 class="sub-sec ${stype ? 'sub-' + stype : ''}">${fmt(m[1])}</h3>`);
+        o.push(
+          `<h3 class="sub-sec ${stype ? 'sub-' + stype : ''}">${fmt(m[1])}</h3>`,
+        );
       } else {
         openSection(tag, m[1], stype);
       }
       continue;
     }
-
-    // ── Plain-text section headers (no # prefix) ──
     if (
-      t && !t.startsWith('*') && !t.startsWith('-') && !t.startsWith('•') &&
-      !/^\d+\./.test(t) && t.length < 120 && /^[A-Z]/.test(t) && getSectionType(t)
+      t &&
+      !t.startsWith('*') &&
+      !t.startsWith('-') &&
+      !t.startsWith('•') &&
+      !/^\d+\./.test(t) &&
+      t.length < 120 &&
+      /^[A-Z]/.test(t) &&
+      getSectionType(t)
     ) {
       openSection('h2', t, getSectionType(t));
       continue;
     }
-
-    // ── Horizontal rule ──
-    if (/^[-*_]{3,}\s*$/.test(t)) { closeList(); o.push('<hr>'); continue; }
-
-    // ── Bold-only line → subheading ──
+    if (/^[-*_]{3,}\s*$/.test(t)) {
+      closeList();
+      o.push('<hr>');
+      continue;
+    }
     const boldLine = t.match(/^\*\*(.+?)\*\*:?\s*$/);
     if (boldLine && t.length < 100 && !t.match(/^[*\-•]\s/)) {
       closeList();
       o.push(`<div class="subhead">${boldLine[1].replace(/:$/, '')}</div>`);
       continue;
     }
-
-    // ── Bullet list ──
     const bul = t.match(/^[*\-•]\s+(.+)$/);
     if (bul) {
-      if (inList !== 'ul') { closeList(); o.push('<ul>'); inList = 'ul'; }
+      if (inList !== 'ul') {
+        closeList();
+        o.push('<ul>');
+        inList = 'ul';
+      }
       o.push(`<li>${fmt(bul[1])}</li>`);
       continue;
     }
-
-    // ── Numbered list ──
     const num = t.match(/^\d+\.\s+(.+)$/);
     if (num) {
-      if (inList !== 'ol') { closeList(); o.push('<ol>'); inList = 'ol'; }
+      if (inList !== 'ol') {
+        closeList();
+        o.push('<ol>');
+        inList = 'ol';
+      }
       o.push(`<li>${fmt(num[1])}</li>`);
       continue;
     }
-
-    // ── Empty line ──
-    if (t === '') { closeList(); continue; }
-
-    // ── Regular paragraph ──
+    if (t === '') {
+      closeList();
+      continue;
+    }
     closeList();
     o.push(`<p>${fmt(t)}</p>`);
   }
 
-  closeList(); closeCard();
+  closeList();
+  closeCard();
   const body = o.join('\n');
 
   return `<!DOCTYPE html>
@@ -149,17 +221,14 @@ function buildFallbackHtml(rawText: string): string {
 
 body{font-family:'Inter',system-ui,sans-serif;background:#f1f5f9;color:var(--navy);line-height:1.7;-webkit-font-smoothing:antialiased}
 
-/* ═══ HEADER ═══ */
 .hdr{background:linear-gradient(135deg,#1e3a5f,var(--navy));color:#fff;padding:56px 48px 48px;position:relative;overflow:hidden}
 .hdr::after{content:'';position:absolute;top:-40%;right:-8%;width:500px;height:500px;background:radial-gradient(circle,rgba(99,102,241,.12),transparent 70%)}
 .hdr .badge{display:inline-block;background:rgba(59,130,246,.18);border:1px solid rgba(59,130,246,.35);color:#93c5fd;padding:5px 16px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:16px}
 .hdr h1{font-size:32px;font-weight:900;letter-spacing:-.5px;margin:0 0 4px}
 .hdr .sub{font-size:14px;opacity:.55}
 
-/* ═══ BODY ═══ */
 .body{max-width:920px;margin:0 auto;padding:32px 20px 80px}
 
-/* ═══ SECTION HEADINGS ═══ */
 .sec{
   font-size:17px;font-weight:800;color:var(--navy);margin:36px 0 0;
   padding:18px 24px 14px 24px;background:#fff;
@@ -175,7 +244,6 @@ body{font-family:'Inter',system-ui,sans-serif;background:#f1f5f9;color:var(--nav
 .sec-purple{border-left-color:var(--purple)}
 .sec-stats{border-left-color:#6366f1}
 
-/* ═══ CARDS ═══ */
 section.card{
   background:#fff;border:1px solid var(--border);border-top:none;
   border-radius:0 0 10px 10px;padding:8px 0 16px;margin-bottom:12px;
@@ -185,7 +253,6 @@ section.card{
 .card-objection{background:#faf5ff;border-left:3px solid #ddd6fe}
 .card-warning{background:#fffbeb;border-left:3px solid #fde68a}
 
-/* ═══ SUB-SECTION (### inside card) ═══ */
 .sub-sec{
   font-size:14.5px;font-weight:700;color:var(--navy);margin:0;
   padding:16px 24px 8px;background:rgba(0,0,0,.02);
@@ -194,30 +261,25 @@ section.card{
 .sub-sec:first-child{border-top:none}
 .sub-objection{color:var(--purple)}
 
-/* ═══ SUBHEAD (bold-only line) ═══ */
 .subhead{
   font-size:14px;font-weight:800;color:var(--navy);
   padding:18px 24px 6px;letter-spacing:-.2px;
   border-bottom:2px solid var(--border);margin:0 24px;
 }
 
-/* ═══ PARAGRAPHS ═══ */
 p{font-size:14px;line-height:1.8;color:var(--slate);padding:6px 24px}
 
-/* ═══ BOLD LABEL (text ending with colon) ═══ */
 .lbl{
   font-weight:800;color:var(--navy);display:inline;
   background:linear-gradient(to top,rgba(59,130,246,.15) 0%,rgba(59,130,246,.15) 35%,transparent 35%);
   padding:0 3px;border-radius:2px;
 }
 
-/* ═══ INLINE ═══ */
 b{font-weight:800;color:var(--navy)}
 b.bi{font-weight:800;color:var(--navy);font-style:italic}
 i{color:#475569;font-style:italic}
 code{font-family:'SF Mono',Consolas,monospace;font-size:12px;background:#f1f5f9;color:#dc2626;padding:2px 6px;border-radius:4px}
 
-/* ═══ LISTS ═══ */
 ul,ol{margin:0;padding:6px 24px 6px 52px;list-style:none}
 ol{counter-reset:ol}
 
@@ -227,12 +289,10 @@ li{
 }
 li:last-child{border-bottom:none}
 
-/* bullet dots */
 ul>li::before{
   content:'';position:absolute;left:-20px;top:18px;
   width:7px;height:7px;border-radius:50%;background:var(--blue);
 }
-/* numbered badges */
 ol>li{counter-increment:ol;padding-left:4px}
 ol>li::before{
   content:counter(ol);position:absolute;left:-32px;top:9px;
@@ -240,7 +300,6 @@ ol>li::before{
   font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;
 }
 
-/* colored list markers per card type */
 .card-danger ul>li::before{background:var(--red)}
 .card-success ul>li::before{background:var(--green)}
 .card-danger ol>li::before{background:#fef2f2;color:var(--red)}
@@ -248,7 +307,6 @@ ol>li::before{
 .card-objection ol>li::before{background:#f5f3ff;color:var(--purple)}
 .card-warning ol>li::before{background:#fffbeb;color:var(--orange)}
 
-/* bold labels inside lists are extra prominent */
 li .lbl{
   display:inline-block;margin-bottom:2px;font-size:13.5px;
   background:linear-gradient(to top,rgba(59,130,246,.18) 0%,rgba(59,130,246,.18) 40%,transparent 40%);
@@ -266,12 +324,10 @@ li .lbl{
   color:#6d28d9;
 }
 
-/* bold inside li */
 li b{font-weight:800;color:var(--navy)}
 
 hr{border:none;height:1px;background:var(--border);margin:28px 0}
 
-/* ═══ RESPONSIVE ═══ */
 @media(max-width:640px){
   .hdr{padding:36px 20px 32px}
   .hdr h1{font-size:24px}
@@ -281,7 +337,6 @@ hr{border:none;height:1px;background:var(--border);margin:28px 0}
   .subhead{margin:0 16px}
 }
 
-/* ═══ PRINT ═══ */
 @media print{
   body{background:#fff}
   .hdr{break-after:avoid;padding:32px}
@@ -302,13 +357,38 @@ ${body}
 </body></html>`;
 }
 
+// ── Main Component ───────────────────────────────────────────────────
+
 export function BattleCardPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
+  usePageTitle(`Battle Card: ${jobId ?? ''}`);
   const [result, setResult] = useState<BattleCardResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'card' | 'infographic'>('card');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Shadow DOM + TOC state
+  const cardHostRef = useRef<HTMLDivElement>(null);
+  const shadowRef = useRef<ShadowRoot | null>(null);
+  const [tocSections, setTocSections] = useState<TocSection[]>([]);
+  const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [mobileTocOpen, setMobileTocOpen] = useState(false);
+  const [pdfExporting, setPdfExporting] = useState(false);
+
+  // Close mobile menu on outside click
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMobileMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [mobileMenuOpen]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -327,12 +407,79 @@ export function BattleCardPage() {
     fetchResult();
   }, [jobId]);
 
-  // Resolve the HTML to display: prefer battle_card_html, fallback to raw_output
+  // Resolve the HTML to display
   const displayHtml =
     result?.battle_card_html ??
-    (result?.raw_output && typeof result.raw_output === 'object' && 'final_text' in result.raw_output
-      ? buildFallbackHtml((result.raw_output as Record<string, string>).final_text)
+    (result?.raw_output &&
+    typeof result.raw_output === 'object' &&
+    'final_text' in result.raw_output
+      ? buildFallbackHtml(
+          (result.raw_output as Record<string, string>).final_text,
+        )
       : null);
+
+  // ── Shadow DOM rendering + section scanning ──────────────────────
+
+  useEffect(() => {
+    if (!displayHtml || !cardHostRef.current || activeTab !== 'card') return;
+
+    const host = cardHostRef.current;
+
+    // Attach or reuse shadow root
+    const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
+    shadowRef.current = shadow;
+
+    const { linkTags, styles, body } = parseHtmlDocument(displayHtml);
+
+    // Extra style for scroll offset under sticky header
+    const scrollStyle =
+      '<style>h2[id]{scroll-margin-top:80px}.card h2[id]{scroll-margin-top:80px}</style>';
+
+    shadow.innerHTML = linkTags + styles + scrollStyle + body;
+
+    // Scan for h2 headings and build TOC
+    const h2Elements = shadow.querySelectorAll('h2');
+    const sections: TocSection[] = [];
+
+    h2Elements.forEach((el, i) => {
+      const id = `bc-sec-${i}`;
+      el.setAttribute('id', id);
+      const raw = el.textContent?.trim() || `Section ${i + 1}`;
+      sections.push({ id, label: cleanTocLabel(raw) });
+    });
+
+    setTocSections(sections);
+    if (sections.length > 0) {
+      setActiveSection(sections[0].id);
+    }
+
+    // IntersectionObserver for active section tracking
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setActiveSection(entry.target.id);
+          }
+        }
+      },
+      { rootMargin: '-80px 0px -60% 0px' },
+    );
+
+    h2Elements.forEach((el) => observer.observe(el));
+
+    return () => observer.disconnect();
+  }, [displayHtml, activeTab]);
+
+  const scrollToSection = useCallback((id: string) => {
+    const el = shadowRef.current?.getElementById(id);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setActiveSection(id);
+      setMobileTocOpen(false);
+    }
+  }, []);
+
+  // ── Download / Share / Print handlers ────────────────────────────
 
   const handleDownloadHtml = () => {
     if (!displayHtml) return;
@@ -343,6 +490,7 @@ export function BattleCardPage() {
     a.download = `battle_card_${jobId}.html`;
     a.click();
     URL.revokeObjectURL(url);
+    toast.success('HTML battle card downloaded');
   };
 
   const handleDownloadImage = () => {
@@ -351,6 +499,7 @@ export function BattleCardPage() {
     a.href = `data:image/png;base64,${result.infographic_base64}`;
     a.download = `comparison_${jobId}.png`;
     a.click();
+    toast.success('Comparison chart downloaded');
   };
 
   const handleDownloadText = () => {
@@ -366,36 +515,104 @@ export function BattleCardPage() {
     a.download = `battle_card_${jobId}.txt`;
     a.click();
     URL.revokeObjectURL(url);
+    toast.success('Raw text file downloaded');
   };
 
-  const handlePrint = () => {
-    if (!displayHtml) return;
-    const win = window.open('', '_blank');
-    if (!win) return;
-    win.document.write(displayHtml);
-    win.document.close();
-    win.onload = () => {
-      win.print();
-    };
+  const handleDownloadPdf = async () => {
+    if (!displayHtml || !jobId) return;
+    setPdfExporting(true);
+    try {
+      const { exportBattleCardPdf } = await import('@/utils/pdfExport');
+      await exportBattleCardPdf({
+        html: displayHtml,
+        jobId,
+        tocEntries: tocSections,
+      });
+      toast.success('PDF downloaded');
+    } catch {
+      toast.error('Failed to generate PDF. Please try again.');
+    } finally {
+      setPdfExporting(false);
+    }
   };
+
+  const handleShare = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      toast.success('Link copied to clipboard');
+    } catch {
+      toast.error('Failed to copy link');
+    }
+  };
+
+  // ── Loading state ────────────────────────────────────────────────
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <Loader2 className="mx-auto h-8 w-8 animate-spin text-blue-600" />
-          <p className="mt-3 text-sm text-gray-500">Loading battle card...</p>
+      <div className="min-h-screen bg-gray-50">
+        <div className="border-b border-gray-200 bg-white px-6 py-3">
+          <div className="mx-auto flex max-w-7xl items-center justify-between">
+            <div className="flex items-center gap-4">
+              <Skeleton className="h-4 w-24" />
+              <div className="h-5 w-px bg-gray-200" />
+              <Skeleton className="h-4 w-36" />
+            </div>
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-9 w-32 rounded-lg" />
+              <Skeleton className="h-9 w-32 rounded-lg" />
+              <Skeleton className="h-9 w-20 rounded-lg" />
+            </div>
+          </div>
+        </div>
+        <div className="border-b border-gray-200 bg-white">
+          <div className="mx-auto max-w-7xl px-6">
+            <div className="flex gap-6 py-3">
+              <Skeleton className="h-5 w-28" />
+              <Skeleton className="h-5 w-44" />
+            </div>
+          </div>
+        </div>
+        <div className="mx-auto max-w-7xl px-6 py-8">
+          <div className="flex gap-6">
+            <div className="hidden w-52 shrink-0 lg:block">
+              <Skeleton className="h-64 w-full rounded-xl" />
+            </div>
+            <div className="flex-1">
+              <Skeleton className="h-[500px] w-full rounded-xl" />
+            </div>
+          </div>
+          <div className="mt-8">
+            <Skeleton className="mb-4 h-4 w-36" />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-4 rounded-xl border border-gray-200 bg-white p-4"
+                >
+                  <Skeleton className="h-11 w-11 shrink-0 rounded-lg" />
+                  <div className="flex-1">
+                    <Skeleton className="mb-1.5 h-4 w-20" />
+                    <Skeleton className="h-3 w-32" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     );
   }
+
+  // ── Error state ──────────────────────────────────────────────────
 
   if (error || !result) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
         <div className="max-w-sm text-center">
           <AlertCircle className="mx-auto h-10 w-10 text-red-400" />
-          <p className="mt-3 text-sm text-gray-700">{error || 'Battle card not found.'}</p>
+          <p className="mt-3 text-sm text-gray-700">
+            {error || 'Battle card not found.'}
+          </p>
           <button
             onClick={() => navigate('/dashboard')}
             className="mt-4 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
@@ -406,6 +623,10 @@ export function BattleCardPage() {
       </div>
     );
   }
+
+  // ── Main render ──────────────────────────────────────────────────
+
+  const hasToc = tocSections.length > 0 && activeTab === 'card';
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -425,7 +646,9 @@ export function BattleCardPage() {
               Battle Card: {jobId}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+
+          {/* Desktop actions */}
+          <div className="hidden items-center gap-2 sm:flex">
             {result.infographic_base64 && (
               <button
                 onClick={handleDownloadImage}
@@ -437,17 +660,91 @@ export function BattleCardPage() {
             )}
             {displayHtml && (
               <button
-                onClick={handleDownloadHtml}
-                className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                onClick={handleDownloadPdf}
+                disabled={pdfExporting}
+                className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
               >
-                <Download className="h-4 w-4" />
-                Download HTML
+                {pdfExporting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FileDown className="h-4 w-4" />
+                )}
+                {pdfExporting ? 'Generating...' : 'Download PDF'}
               </button>
             )}
-            <button className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">
+            <button
+              onClick={handleShare}
+              className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
               <Share2 className="h-4 w-4" />
               Share
             </button>
+          </div>
+
+          {/* Mobile actions dropdown */}
+          <div ref={menuRef} className="relative sm:hidden">
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"
+              aria-label="Actions"
+            >
+              <MoreVertical className="h-4 w-4" />
+            </button>
+            {mobileMenuOpen && (
+              <div className="absolute right-0 z-50 mt-1 w-48 rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                {displayHtml && (
+                  <button
+                    onClick={() => {
+                      handleDownloadHtml();
+                      setMobileMenuOpen(false);
+                    }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <Download className="h-4 w-4 text-gray-400" />
+                    Download HTML
+                  </button>
+                )}
+                {result.infographic_base64 && (
+                  <button
+                    onClick={() => {
+                      handleDownloadImage();
+                      setMobileMenuOpen(false);
+                    }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <Image className="h-4 w-4 text-gray-400" />
+                    Download Chart
+                  </button>
+                )}
+                {displayHtml && (
+                  <button
+                    onClick={() => {
+                      handleDownloadPdf();
+                      setMobileMenuOpen(false);
+                    }}
+                    disabled={pdfExporting}
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                  >
+                    {pdfExporting ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+                    ) : (
+                      <FileDown className="h-4 w-4 text-gray-400" />
+                    )}
+                    {pdfExporting ? 'Generating...' : 'Download PDF'}
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    handleShare();
+                    setMobileMenuOpen(false);
+                  }}
+                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  <Share2 className="h-4 w-4 text-gray-400" />
+                  Share Link
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -489,13 +786,80 @@ export function BattleCardPage() {
       {/* Content */}
       <div className="mx-auto max-w-7xl px-6 py-8">
         {activeTab === 'card' && displayHtml && (
-          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-            <iframe
-              srcDoc={displayHtml}
-              title="Battle Card"
-              className="h-[800px] w-full border-0"
-              sandbox="allow-same-origin"
-            />
+          <div className="flex gap-6">
+            {/* TOC Sidebar — Desktop */}
+            {hasToc && (
+              <aside className="hidden w-52 shrink-0 lg:block">
+                <nav className="sticky top-20 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    Table of Contents
+                  </h4>
+                  <ul className="space-y-0.5">
+                    {tocSections.map((section) => (
+                      <li key={section.id}>
+                        <button
+                          onClick={() => scrollToSection(section.id)}
+                          className={cn(
+                            'w-full truncate rounded-md px-3 py-1.5 text-left text-[13px] transition-colors',
+                            activeSection === section.id
+                              ? 'bg-blue-50 font-semibold text-blue-700'
+                              : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900',
+                          )}
+                          title={section.label}
+                        >
+                          {section.label}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </nav>
+              </aside>
+            )}
+
+            {/* Main card area */}
+            <div className="min-w-0 flex-1">
+              {/* Mobile TOC toggle */}
+              {hasToc && (
+                <div className="relative mb-4 lg:hidden">
+                  <button
+                    onClick={() => setMobileTocOpen(!mobileTocOpen)}
+                    className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 shadow-sm"
+                  >
+                    <span className="flex items-center gap-2">
+                      <List className="h-4 w-4 text-gray-400" />
+                      {tocSections.find((s) => s.id === activeSection)?.label ??
+                        'Jump to section'}
+                    </span>
+                    <ChevronIcon open={mobileTocOpen} />
+                  </button>
+
+                  {mobileTocOpen && (
+                    <div className="absolute left-0 right-0 top-full z-30 mt-1 rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                      {tocSections.map((section) => (
+                        <button
+                          key={section.id}
+                          onClick={() => scrollToSection(section.id)}
+                          className={cn(
+                            'w-full px-4 py-2 text-left text-sm transition-colors',
+                            activeSection === section.id
+                              ? 'bg-blue-50 font-semibold text-blue-700'
+                              : 'text-gray-600 hover:bg-gray-50',
+                          )}
+                        >
+                          {section.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Battle card (Shadow DOM host) */}
+              <div
+                ref={cardHostRef}
+                className="overflow-hidden rounded-xl border border-gray-200 shadow-sm"
+              />
+            </div>
           </div>
         )}
 
@@ -524,7 +888,6 @@ export function BattleCardPage() {
             Download & Export
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {/* HTML Download */}
             {displayHtml && (
               <button
                 onClick={handleDownloadHtml}
@@ -534,14 +897,17 @@ export function BattleCardPage() {
                   <FileCode className="h-5 w-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-gray-900">HTML File</p>
-                  <p className="text-xs text-gray-500">Full styled battle card</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    HTML File
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Full styled battle card
+                  </p>
                 </div>
                 <Download className="ml-auto h-4 w-4 text-gray-300 transition-colors group-hover:text-blue-500" />
               </button>
             )}
 
-            {/* PNG Download */}
             {result.infographic_base64 && (
               <button
                 onClick={handleDownloadImage}
@@ -551,31 +917,42 @@ export function BattleCardPage() {
                   <FileImage className="h-5 w-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-gray-900">Infographic</p>
-                  <p className="text-xs text-gray-500">Comparison chart PNG</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    Infographic
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Comparison chart PNG
+                  </p>
                 </div>
                 <Download className="ml-auto h-4 w-4 text-gray-300 transition-colors group-hover:text-purple-500" />
               </button>
             )}
 
-            {/* Print / PDF */}
             {displayHtml && (
               <button
-                onClick={handlePrint}
-                className="group flex items-center gap-4 rounded-xl border border-gray-200 bg-white p-4 text-left transition-all hover:border-green-300 hover:shadow-md"
+                onClick={handleDownloadPdf}
+                disabled={pdfExporting}
+                className="group flex items-center gap-4 rounded-xl border border-gray-200 bg-white p-4 text-left transition-all hover:border-green-300 hover:shadow-md disabled:opacity-60"
               >
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-green-50 text-green-600 transition-colors group-hover:bg-green-100">
-                  <Printer className="h-5 w-5" />
+                  {pdfExporting ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <FileDown className="h-5 w-5" />
+                  )}
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-gray-900">Print / PDF</p>
-                  <p className="text-xs text-gray-500">Print or save as PDF</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {pdfExporting ? 'Generating PDF...' : 'Download PDF'}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Branded PDF with table of contents
+                  </p>
                 </div>
-                <FileDown className="ml-auto h-4 w-4 text-gray-300 transition-colors group-hover:text-green-500" />
+                <Download className="ml-auto h-4 w-4 text-gray-300 transition-colors group-hover:text-green-500" />
               </button>
             )}
 
-            {/* Raw Text Download */}
             {result.raw_output && (
               <button
                 onClick={handleDownloadText}
@@ -585,7 +962,9 @@ export function BattleCardPage() {
                   <FileText className="h-5 w-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-gray-900">Raw Text</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    Raw Text
+                  </p>
                   <p className="text-xs text-gray-500">Plain text export</p>
                 </div>
                 <Download className="ml-auto h-4 w-4 text-gray-300 transition-colors group-hover:text-amber-500" />
@@ -595,5 +974,26 @@ export function BattleCardPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Small helpers ────────────────────────────────────────────────────
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={cn(
+        'h-4 w-4 text-gray-400 transition-transform duration-200',
+        open && 'rotate-180',
+      )}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
   );
 }
