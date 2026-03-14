@@ -26,6 +26,7 @@ class BattleCardRequest(BaseModel):
     project_name: str | None = None
     about_project: str | None = None
     template: TemplateEnum = TemplateEnum.DETAILED
+    force_refresh: bool = False
 
 
 class StageStatus(BaseModel):

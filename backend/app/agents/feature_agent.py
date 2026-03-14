@@ -6,43 +6,15 @@ product_feature_agent = LlmAgent(
     name="ProductFeatureAgent",
     model=settings.FAST_MODEL,
     description="Analyzes competitor product features and capabilities",
-    instruction="""
-You are a product analyst comparing competitor features.
+    instruction="""Analyze the competitor's product capabilities independently using google_search.
 
-COMPETITOR PROFILE:
-{competitor_profile}
+1. Core Features — main functionality, unique capabilities, problems solved
+2. Integrations — native integrations, API availability, marketplace/ecosystem
+3. Technical — cloud/on-premise, mobile apps, security certs (SOC2, GDPR)
+4. Pricing — per-seat cost, tier breakdown, add-ons, hidden costs, contracts
+5. Limitations — feature gaps from reviews, scalability issues, known problems
 
-Use google_search to deeply analyze their product capabilities:
-
-**ANALYZE THESE AREAS:**
-
-1. **Core Features**
-   - Main functionality and capabilities
-   - Unique features they promote
-   - What problems they solve
-
-2. **Integrations & Ecosystem**
-   - Native integrations
-   - API availability
-   - Marketplace/app ecosystem
-
-3. **Technical Architecture**
-   - Cloud vs. on-premise options
-   - Mobile apps
-   - Security certifications (SOC2, GDPR, etc.)
-
-4. **Pricing Details**
-   - Price per seat/user
-   - What's included in each tier
-   - Add-ons and hidden costs
-   - Contract requirements
-
-5. **Limitations**
-   - Feature gaps mentioned in reviews
-   - Scalability concerns
-   - Known technical issues
-
-Create a detailed feature inventory for comparison.
+Output a detailed feature inventory.
 """,
     tools=[google_search],
     output_key="feature_analysis",

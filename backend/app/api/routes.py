@@ -10,6 +10,7 @@ from google.genai import types
 
 from app.agents import root_agent, competitor_discovery_agent
 from app.schemas import BattleCardRequest, BattleCardResponse
+from app.cache import cache_manager
 
 router = APIRouter(prefix="/api/battlecard", tags=["battlecard"])
 
@@ -104,15 +105,50 @@ async def discover_competitors(request: DiscoverRequest):
 
 # ── Pipeline Runner ─────────────────────────────────────────────────
 
+# Stages 1-3 run in parallel, so they share the same progress ceiling (42%).
+# Individual parallel stage progress is calculated dynamically below.
 _STAGE_MAP = {
-    "CompetitorResearchAgent": ("research", 14),
-    "ProductFeatureAgent": ("feature_analysis", 28),
-    "PositioningAnalyzer": ("positioning_intel", 42),
+    "CompetitorResearchAgent": ("research", "parallel"),
+    "ProductFeatureAgent": ("feature_analysis", "parallel"),
+    "PositioningAnalyzer": ("positioning_intel", "parallel"),
     "StrengthsWeaknessesAgent": ("swot_analysis", 57),
     "ObjectionHandlerAgent": ("objection_scripts", 71),
     "BattleCardGenerator": ("battle_card", 85),
     "ComparisonChartAgent": ("comparison_chart", 100),
 }
+
+# The three parallel stages together fill 0% → 42% of overall progress.
+_PARALLEL_STAGES = {"research", "feature_analysis", "positioning_intel"}
+_PARALLEL_CEILING = 42  # progress value when all 3 parallel stages are done
+_PER_PARALLEL_STAGE = _PARALLEL_CEILING // 3  # ~14% each
+
+
+def _calc_progress(job: dict) -> int:
+    """Calculate overall progress accounting for parallel stages."""
+    completed = set(job.get("stage_outputs", {}).keys())
+
+    # Count how many parallel stages are done
+    parallel_done = len(completed & _PARALLEL_STAGES)
+
+    # If we're still in the parallel phase
+    current = job.get("current_stage")
+    if current in _PARALLEL_STAGES or (
+        current is None and parallel_done < len(_PARALLEL_STAGES)
+    ):
+        return parallel_done * _PER_PARALLEL_STAGE
+
+    # If parallel phase is complete, check sequential stages
+    if parallel_done == len(_PARALLEL_STAGES):
+        for agent_name, (stage, progress) in _STAGE_MAP.items():
+            if progress == "parallel":
+                continue
+            if stage == current:
+                return progress
+            if stage in completed:
+                continue
+
+    # Fallback: use the stored progress
+    return job.get("progress", 0)
 
 
 _TEMPLATE_INSTRUCTIONS = {
@@ -140,12 +176,43 @@ _TEMPLATE_INSTRUCTIONS = {
 
 
 async def _run_pipeline(job_id: str, request: BattleCardRequest) -> None:
-    """Run the agent pipeline in the background."""
+    """Run the agent pipeline in the background, using cache when possible."""
     try:
         _jobs[job_id]["status"] = "processing"
 
+        # ── Check cache for parallel research stages ──────────────
+        cached_stages: dict[str, str] | None = None
+        used_cache = False
+
+        if not request.force_refresh:
+            cached_stages = cache_manager.get(
+                request.competitor, request.your_product
+            )
+
+        if cached_stages:
+            # Cache hit — inject cached outputs directly
+            used_cache = True
+            _jobs[job_id]["cache_hit"] = True
+            for stage_name, content in cached_stages.items():
+                _jobs[job_id]["stage_outputs"][stage_name] = content
+            _jobs[job_id]["progress"] = _PARALLEL_CEILING
+            _jobs[job_id]["current_stage"] = "swot_analysis"
+        else:
+            _jobs[job_id]["cache_hit"] = False
+
+        # ── Build runner and session ──────────────────────────────
+        # When cache hit, we use a pipeline that skips parallel agents.
+        # We import both pipelines and pick the right root agent.
+        if used_cache:
+            from app.agents.pipeline import synthesis_only_pipeline
+            from app.agents.root_agent import _build_root_agent
+
+            run_agent = _build_root_agent(synthesis_only_pipeline)
+        else:
+            run_agent = root_agent
+
         runner = Runner(
-            agent=root_agent,
+            agent=run_agent,
             app_name="ai_sales_agent",
             session_service=session_service,
         )
@@ -154,6 +221,24 @@ async def _run_pipeline(job_id: str, request: BattleCardRequest) -> None:
             app_name="ai_sales_agent",
             user_id=f"user_{job_id}",
         )
+
+        # If cache hit, pre-load cached outputs into session state so
+        # downstream agents can reference {competitor_profile} etc.
+        if used_cache and cached_stages:
+            sess = await session_service.get_session(
+                app_name="ai_sales_agent",
+                user_id=f"user_{job_id}",
+                session_id=session.id,
+            )
+            sess.state["competitor_profile"] = cached_stages.get(
+                "research", ""
+            )
+            sess.state["feature_analysis"] = cached_stages.get(
+                "feature_analysis", ""
+            )
+            sess.state["positioning_intel"] = cached_stages.get(
+                "positioning_intel", ""
+            )
 
         template_key = request.template or "detailed"
         template_instruction = _TEMPLATE_INSTRUCTIONS.get(
@@ -205,7 +290,13 @@ async def _run_pipeline(job_id: str, request: BattleCardRequest) -> None:
                     current_author = event.author
                     stage, progress = _STAGE_MAP[event.author]
                     _jobs[job_id]["current_stage"] = stage
-                    _jobs[job_id]["progress"] = progress
+                    # Use dynamic progress for parallel stages
+                    if progress == "parallel":
+                        _jobs[job_id]["progress"] = _calc_progress(
+                            _jobs[job_id]
+                        )
+                    else:
+                        _jobs[job_id]["progress"] = progress
 
             # Accumulate text for current agent
             if event.content and event.content.parts:
@@ -275,6 +366,18 @@ async def _run_pipeline(job_id: str, request: BattleCardRequest) -> None:
                 "[Comparison chart infographic generated]"
             )
 
+        # ── Save parallel stage outputs to cache (if not from cache) ──
+        if not used_cache:
+            parallel_outputs = {
+                k: v
+                for k, v in stage_outputs.items()
+                if k in _PARALLEL_STAGES
+            }
+            if len(parallel_outputs) == len(_PARALLEL_STAGES):
+                cache_manager.save(
+                    request.competitor, request.your_product, parallel_outputs
+                )
+
         _jobs[job_id].update(
             {
                 "status": "completed",
@@ -329,13 +432,26 @@ async def get_job_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = _jobs[job_id]
+    completed_stages = list(job.get("stage_outputs", {}).keys())
+
+    # Determine which parallel stages are currently running
+    running_stages: list[str] = []
+    current = job.get("current_stage")
+    if current in _PARALLEL_STAGES and job["status"] == "processing":
+        # During parallel phase, all non-completed parallel stages are running
+        running_stages = [
+            s for s in _PARALLEL_STAGES if s not in completed_stages
+        ]
+
     return {
         "job_id": job_id,
         "status": job["status"],
-        "progress": job["progress"],
+        "progress": _calc_progress(job) if job["status"] == "processing" else job["progress"],
         "current_stage": job["current_stage"],
         "error": job.get("error"),
-        "completed_stages": list(job.get("stage_outputs", {}).keys()),
+        "completed_stages": completed_stages,
+        "running_stages": running_stages,
+        "cache_hit": job.get("cache_hit", False),
         "project_name": job.get("project_name"),
         "competitor": job.get("competitor"),
         "created_at": job.get("created_at"),
@@ -399,3 +515,19 @@ async def list_jobs():
             for jid, data in _jobs.items()
         ]
     }
+
+
+# ── Cache Management ───────────────────────────────────────────────
+
+
+@router.get("/cache/stats")
+async def get_cache_stats():
+    """Get cache statistics and active entries."""
+    return cache_manager.stats()
+
+
+@router.delete("/cache/clear")
+async def clear_cache():
+    """Clear all cached research data."""
+    count = cache_manager.clear()
+    return {"cleared": count}

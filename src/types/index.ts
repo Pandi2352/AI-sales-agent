@@ -46,6 +46,7 @@ export interface BattleCardRequest {
   project_name?: string;
   about_project?: string;
   template?: TemplateName;
+  force_refresh?: boolean;
 }
 
 export interface BattleCardGenerateResponse {
@@ -60,6 +61,8 @@ export interface PipelineStatusResponse {
   current_stage: StageName | null;
   error: string | null;
   completed_stages: StageName[];
+  running_stages?: StageName[];
+  cache_hit?: boolean;
   project_name?: string;
   competitor?: string;
   created_at?: string;

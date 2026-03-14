@@ -6,41 +6,18 @@ competitor_discovery_agent = LlmAgent(
     name="CompetitorDiscoveryAgent",
     model=settings.FAST_MODEL,
     description="Discovers competitors based on user's product description",
-    instruction="""
-You are a competitive intelligence analyst. The user will describe their product/project.
-Your job is to identify their TOP COMPETITORS using web search.
+    instruction="""Find competitors for the user's product using google_search.
 
-Use google_search to find real competitors for the described product/project.
+Search for: "[category] competitors", "alternatives to [similar products]", "[industry] market leaders", G2/Capterra category listings.
 
-**SEARCH STRATEGY:**
-1. Search for "[product category] competitors"
-2. Search for "alternatives to [similar products]"
-3. Search for "[industry] market leaders"
-4. Search for G2/Capterra category listings
+Return ONLY this JSON (no markdown, no extra text):
 
-**RETURN EXACTLY THIS JSON FORMAT (no markdown, no extra text):**
+{"competitors": [{"name": "Company Name", "website": "https://example.com", "description": "What they do (under 15 words)", "why_competitor": "Why they compete", "market_position": "Leader / Challenger / Niche"}]}
 
-```json
-{
-  "competitors": [
-    {
-      "name": "Company Name",
-      "website": "https://example.com",
-      "description": "One-line description of what they do",
-      "why_competitor": "Why they compete with the user's product",
-      "market_position": "Leader / Challenger / Niche"
-    }
-  ]
-}
-```
-
-**RULES:**
-- Return 5-8 competitors, ranked by relevance
-- Only include REAL companies with REAL websites
-- Focus on direct competitors, not tangential ones
-- Include a mix of market leaders and emerging players
-- The description should be concise (under 15 words)
-- ONLY output the JSON, nothing else before or after it
+Rules:
+- 5-8 competitors ranked by relevance
+- Only real companies with real websites
+- Direct competitors only, mix of leaders and emerging players
 """,
     tools=[google_search],
     output_key="discovered_competitors",

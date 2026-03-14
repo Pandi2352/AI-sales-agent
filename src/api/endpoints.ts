@@ -18,5 +18,7 @@ export const ENDPOINTS = {
       `/battlecard/stage-result/${jobId}/${stageName}`,
     LIST: '/battlecard/list',
     DISCOVER: '/battlecard/discover-competitors',
+    CACHE_STATS: '/battlecard/cache/stats',
+    CACHE_CLEAR: '/battlecard/cache/clear',
   },
 } as const;

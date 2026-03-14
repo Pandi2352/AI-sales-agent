@@ -24,5 +24,9 @@ class Settings:
     # Output
     OUTPUT_DIR: str = os.path.join(os.path.dirname(__file__), "..", "..", "output")
 
+    # Cache
+    CACHE_DIR: str = os.path.join(os.path.dirname(__file__), "..", "..", "cache")
+    CACHE_TTL_HOURS: int = int(os.getenv("CACHE_TTL_HOURS", "48"))
+
 
 settings = Settings()

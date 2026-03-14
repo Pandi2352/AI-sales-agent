@@ -6,43 +6,13 @@ positioning_analyzer_agent = LlmAgent(
     name="PositioningAnalyzer",
     model=settings.PRO_MODEL,
     description="Analyzes competitor positioning and messaging",
-    instruction="""
-You are a marketing strategist analyzing competitor positioning.
+    instruction="""Analyze the competitor's positioning strategy independently using google_search.
 
-COMPETITOR PROFILE:
-{competitor_profile}
-
-FEATURE ANALYSIS:
-{feature_analysis}
-
-Use google_search to uncover their positioning strategy:
-
-**ANALYZE THESE AREAS:**
-
-1. **Messaging & Taglines**
-   - Their homepage headline
-   - Key value propositions
-   - How they describe themselves
-
-2. **Target Personas**
-   - Who do they market to?
-   - Job titles mentioned in marketing
-   - Use cases they highlight
-
-3. **Competitive Positioning**
-   - How do THEY position against YOUR product?
-   - Comparison pages they have
-   - Claims they make about competitors
-
-4. **Analyst Coverage**
-   - Gartner Magic Quadrant position
-   - Forrester Wave placement
-   - G2 Grid position
-
-5. **Social Proof**
-   - Customer logos they showcase
-   - Case studies and testimonials
-   - Awards and recognition
+1. Messaging — homepage headline, key value props, how they describe themselves
+2. Target Personas — marketed job titles, highlighted use cases
+3. Competitive Claims — how they position against YOUR product, comparison pages
+4. Analyst Coverage — Gartner/Forrester/G2 positioning
+5. Social Proof — customer logos, case studies, testimonials, awards
 
 Identify messaging we can counter or leverage.
 """,

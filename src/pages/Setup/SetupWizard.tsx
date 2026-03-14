@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   Sparkles,
   Pencil,
+  RefreshCw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { battlecardService } from '@/services';
@@ -35,6 +36,7 @@ interface WizardData {
   competitor: string;
   targetAudience: string;
   template: TemplateName;
+  forceRefresh: boolean;
   discoveredCompetitors: DiscoveredCompetitor[];
   selectedCompetitorName: string | null;
 }
@@ -46,6 +48,7 @@ const INITIAL_STATE: WizardData = {
   competitor: '',
   targetAudience: '',
   template: 'detailed',
+  forceRefresh: false,
   discoveredCompetitors: [],
   selectedCompetitorName: null,
 };
@@ -149,7 +152,7 @@ export function SetupWizard() {
     setError('');
   }, []);
 
-  const progress = Math.round(((data.step + 1) / STEPS.length) * 100);
+  const progress = Math.round((data.step / (STEPS.length - 1)) * 100);
 
   // ── Step Validation ──────────────────────────────────────────────
 
@@ -242,6 +245,7 @@ export function SetupWizard() {
         project_name: data.projectName,
         about_project: data.aboutProject || undefined,
         template: data.template,
+        force_refresh: data.forceRefresh || undefined,
       });
 
       clearState();
@@ -339,7 +343,7 @@ export function SetupWizard() {
             />
           )}
 
-          {data.step === 3 && <StepReview data={data} onEdit={goTo} />}
+          {data.step === 3 && <StepReview data={data} onEdit={goTo} onChange={update} />}
 
           {/* Navigation */}
           <div className="mt-8 flex items-center gap-3">
@@ -700,9 +704,11 @@ function StepAudience({
 function StepReview({
   data,
   onEdit,
+  onChange,
 }: {
   data: WizardData;
   onEdit: (step: number) => void;
+  onChange: (partial: Partial<WizardData>) => void;
 }) {
   const templateLabel =
     TEMPLATES.find((t) => t.id === data.template)?.label ??
@@ -740,6 +746,36 @@ function StepReview({
           </div>
         ))}
       </div>
+
+      {/* Force Refresh Toggle */}
+      <label
+        className={cn(
+          'flex cursor-pointer items-center gap-3 rounded-lg border p-4 transition-all',
+          data.forceRefresh
+            ? 'border-amber-300 bg-amber-50'
+            : 'border-gray-200 hover:border-gray-300',
+        )}
+      >
+        <input
+          type="checkbox"
+          checked={data.forceRefresh}
+          onChange={(e) => onChange({ forceRefresh: e.target.checked })}
+          className="h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+        />
+        <RefreshCw
+          className={cn(
+            'h-4 w-4 shrink-0',
+            data.forceRefresh ? 'text-amber-600' : 'text-gray-400',
+          )}
+        />
+        <div>
+          <p className="text-sm font-medium text-gray-900">Force Fresh Research</p>
+          <p className="text-xs text-gray-500">
+            Skip cached data and re-run all research agents from scratch.
+            Use this if the competitor has recently changed their product or pricing.
+          </p>
+        </div>
+      </label>
 
       <p className="text-center text-xs text-gray-500">
         By starting the pipeline, our AI will begin scanning 200+ data sources

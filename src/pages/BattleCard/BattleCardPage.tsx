@@ -28,33 +28,6 @@ interface TocSection {
   label: string;
 }
 
-/** Extract <style> tags and <body> content from a full HTML document. */
-function parseHtmlDocument(html: string): {
-  linkTags: string;
-  styles: string;
-  body: string;
-} {
-  // Extract <style> tag contents
-  const styleTags = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
-  let styles = styleTags.join('\n');
-
-  // Convert @import url(...) to <link> tags for Shadow DOM compatibility
-  const links: string[] = [];
-  styles = styles.replace(
-    /@import\s+url\(['"]?([^'")\s]+)['"]?\)\s*;?/g,
-    (_, url: string) => {
-      links.push(`<link rel="stylesheet" href="${url}">`);
-      return '';
-    },
-  );
-
-  // Extract body content
-  const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-  const body = bodyMatch ? bodyMatch[1] : html;
-
-  return { linkTags: links.join('\n'), styles, body };
-}
-
 /** Clean a heading's textContent into a short TOC label. */
 function cleanTocLabel(raw: string): string {
   return raw
@@ -370,13 +343,14 @@ export function BattleCardPage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Shadow DOM + TOC state
-  const cardHostRef = useRef<HTMLDivElement>(null);
-  const shadowRef = useRef<ShadowRoot | null>(null);
+  // Iframe renderer + TOC state
+  const cardFrameRef = useRef<HTMLIFrameElement>(null);
+  const frameCleanupRef = useRef<(() => void) | null>(null);
   const [tocSections, setTocSections] = useState<TocSection[]>([]);
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [mobileTocOpen, setMobileTocOpen] = useState(false);
   const [pdfExporting, setPdfExporting] = useState(false);
+  const [cardFrameHeight, setCardFrameHeight] = useState(900);
 
   // Close mobile menu on outside click
   useEffect(() => {
@@ -418,60 +392,103 @@ export function BattleCardPage() {
         )
       : null);
 
-  // ── Shadow DOM rendering + section scanning ──────────────────────
+  // ── Iframe rendering + section scanning ──────────────────────
 
-  useEffect(() => {
-    if (!displayHtml || !cardHostRef.current || activeTab !== 'card') return;
+  const syncCardFrame = useCallback(() => {
+    const frame = cardFrameRef.current;
+    const doc = frame?.contentDocument;
+    const win = frame?.contentWindow;
+    if (!frame || !doc || !win) return;
 
-    const host = cardHostRef.current;
+    frameCleanupRef.current?.();
+    frameCleanupRef.current = null;
 
-    // Attach or reuse shadow root
-    const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
-    shadowRef.current = shadow;
-
-    const { linkTags, styles, body } = parseHtmlDocument(displayHtml);
-
-    // Extra style for scroll offset under sticky header
-    const scrollStyle =
-      '<style>h2[id]{scroll-margin-top:80px}.card h2[id]{scroll-margin-top:80px}</style>';
-
-    shadow.innerHTML = linkTags + styles + scrollStyle + body;
-
-    // Scan for h2 headings and build TOC
-    const h2Elements = shadow.querySelectorAll('h2');
-    const sections: TocSection[] = [];
-
-    h2Elements.forEach((el, i) => {
+    const headings = Array.from(doc.querySelectorAll<HTMLHeadingElement>('h2'));
+    const sections: TocSection[] = headings.map((el, i) => {
       const id = `bc-sec-${i}`;
       el.setAttribute('id', id);
       const raw = el.textContent?.trim() || `Section ${i + 1}`;
-      sections.push({ id, label: cleanTocLabel(raw) });
+      return { id, label: cleanTocLabel(raw) };
     });
 
     setTocSections(sections);
-    if (sections.length > 0) {
-      setActiveSection(sections[0].id);
-    }
+    setActiveSection((prev) => {
+      if (prev && sections.some((section) => section.id === prev)) return prev;
+      return sections[0]?.id ?? null;
+    });
 
-    // IntersectionObserver for active section tracking
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setActiveSection(entry.target.id);
-          }
-        }
-      },
-      { rootMargin: '-80px 0px -60% 0px' },
-    );
+    const updateHeight = () => {
+      const bodyHeight = doc.body?.scrollHeight ?? 0;
+      const rootHeight = doc.documentElement?.scrollHeight ?? 0;
+      setCardFrameHeight(Math.max(bodyHeight, rootHeight, 900));
+    };
 
-    h2Elements.forEach((el) => observer.observe(el));
+    const updateActiveSection = () => {
+      if (headings.length === 0) return;
+      const y = win.scrollY + 120;
+      let currentId = headings[0].id;
+      for (const heading of headings) {
+        const top = heading.getBoundingClientRect().top + win.scrollY;
+        if (top <= y) currentId = heading.id;
+        else break;
+      }
+      setActiveSection(currentId);
+    };
 
-    return () => observer.disconnect();
-  }, [displayHtml, activeTab]);
+    updateHeight();
+    updateActiveSection();
+
+    const handleScroll = () => updateActiveSection();
+    const handleResize = () => {
+      updateHeight();
+      updateActiveSection();
+    };
+
+    win.addEventListener('scroll', handleScroll, { passive: true });
+    win.addEventListener('resize', handleResize);
+
+    const observer =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => updateHeight())
+        : null;
+    if (observer && doc.documentElement) observer.observe(doc.documentElement);
+    if (observer && doc.body) observer.observe(doc.body);
+
+    const lateMeasure = win.setTimeout(updateHeight, 300);
+
+    frameCleanupRef.current = () => {
+      win.removeEventListener('scroll', handleScroll);
+      win.removeEventListener('resize', handleResize);
+      if (observer) observer.disconnect();
+      win.clearTimeout(lateMeasure);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'card' && displayHtml) return;
+    frameCleanupRef.current?.();
+    frameCleanupRef.current = null;
+    setTocSections([]);
+    setActiveSection(null);
+    setMobileTocOpen(false);
+  }, [activeTab, displayHtml]);
+
+  useEffect(
+    () => () => {
+      frameCleanupRef.current?.();
+      frameCleanupRef.current = null;
+    },
+    [],
+  );
+
+  const handleCardFrameLoad = useCallback(() => {
+    if (activeTab !== 'card' || !displayHtml) return;
+    syncCardFrame();
+  }, [activeTab, displayHtml, syncCardFrame]);
 
   const scrollToSection = useCallback((id: string) => {
-    const el = shadowRef.current?.getElementById(id);
+    const frame = cardFrameRef.current;
+    const el = frame?.contentDocument?.getElementById(id);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       setActiveSection(id);
@@ -854,11 +871,17 @@ export function BattleCardPage() {
                 </div>
               )}
 
-              {/* Battle card (Shadow DOM host) */}
-              <div
-                ref={cardHostRef}
-                className="overflow-hidden rounded-xl border border-gray-200 shadow-sm"
-              />
+              {/* Battle card (iframe srcDoc renderer) */}
+              <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                <iframe
+                  ref={cardFrameRef}
+                  title={`Battle Card ${jobId ?? ''}`}
+                  srcDoc={displayHtml}
+                  onLoad={handleCardFrameLoad}
+                  className="w-full border-0"
+                  style={{ height: `${cardFrameHeight}px` }}
+                />
+              </div>
             </div>
           </div>
         )}
@@ -997,3 +1020,4 @@ function ChevronIcon({ open }: { open: boolean }) {
     </svg>
   );
 }
+
